@@ -7,10 +7,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/jchv/go-webview2/internal/w32"
+	"github.com/soarqin/go-webview2/internal/w32"
 	"golang.org/x/sys/windows"
 )
 
@@ -30,6 +31,8 @@ type Chromium struct {
 
 	environment *ICoreWebView2Environment
 
+	pinner *runtime.Pinner
+
 	// Settings
 	DataPath string
 
@@ -42,21 +45,14 @@ type Chromium struct {
 	WebResourceRequestedCallback func(request *ICoreWebView2WebResourceRequest, args *ICoreWebView2WebResourceRequestedEventArgs)
 	NavigationCompletedCallback  func(sender *ICoreWebView2, args *ICoreWebView2NavigationCompletedEventArgs)
 	AcceleratorKeyCallback       func(uint) bool
+
+	// Private callbacks
+	onInit func(*Chromium)
 }
 
-func NewChromium() *Chromium {
+func NewChromium(onInit func(*Chromium)) *Chromium {
 	e := &Chromium{}
-	/*
-	 All these handlers are passed to native code through syscalls with 'uintptr(unsafe.Pointer(handler))' and we know
-	 that a pointer to those will be kept in the native code. Furthermore these handlers als contain pointer to other Go
-	 structs like the vtable.
-	 This violates the unsafe.Pointer rule '(4) Conversion of a Pointer to a uintptr when calling syscall.Syscall.' because
-	 theres no guarantee that Go doesn't move these objects.
-	 AFAIK currently the Go runtime doesn't move HEAP objects, so we should be safe with these handlers. But they don't
-	 guarantee it, because in the future Go might use a compacting GC.
-	 There's a proposal to add a runtime.Pin function, to prevent moving pinned objects, which would allow to easily fix
-	 this issue by just pinning the handlers. The https://go-review.googlesource.com/c/go/+/367296/ should land in Go 1.19.
-	*/
+
 	e.envCompleted = newICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler(e)
 	e.controllerCompleted = newICoreWebView2CreateCoreWebView2ControllerCompletedHandler(e)
 	e.webMessageReceived = newICoreWebView2WebMessageReceivedEventHandler(e)
@@ -64,7 +60,18 @@ func NewChromium() *Chromium {
 	e.webResourceRequested = newICoreWebView2WebResourceRequestedEventHandler(e)
 	e.acceleratorKeyPressed = newICoreWebView2AcceleratorKeyPressedEventHandler(e)
 	e.navigationCompleted = newICoreWebView2NavigationCompletedEventHandler(e)
+	e.pinner = &runtime.Pinner{}
+	e.pinner.Pin(e.envCompleted)
+	e.pinner.Pin(e.controllerCompleted)
+	e.pinner.Pin(e.webMessageReceived)
+	e.pinner.Pin(e.permissionRequested)
+	e.pinner.Pin(e.webResourceRequested)
+	e.pinner.Pin(e.acceleratorKeyPressed)
+	e.pinner.Pin(e.navigationCompleted)
+
 	e.permissions = make(map[CoreWebView2PermissionKind]CoreWebView2PermissionState)
+
+	e.onInit = onInit
 
 	return e
 }
@@ -169,11 +176,12 @@ func (e *Chromium) Release() uintptr {
 }
 
 func (e *Chromium) EnvironmentCompleted(res uintptr, env *ICoreWebView2Environment) uintptr {
-	if int64(res) < 0 {
+	if env == nil || int64(res) < 0 {
 		log.Fatalf("Creating environment failed with %08x", res)
 	}
 	_, _, _ = env.vtbl.AddRef.Call(uintptr(unsafe.Pointer(env)))
 	e.environment = env
+	e.pinner.Pin(e.environment)
 
 	_, _, _ = env.vtbl.CreateCoreWebView2Controller.Call(
 		uintptr(unsafe.Pointer(env)),
@@ -227,6 +235,21 @@ func (e *Chromium) CreateCoreWebView2ControllerCompleted(res uintptr, controller
 		e.Focus()
 	}
 
+	if e.onInit != nil {
+		e.onInit(e)
+	}
+
+	return 0
+}
+
+func (e *Chromium) ExecuteScriptCompleted(errorCode uintptr, result *uint16) uintptr {
+	if int64(errorCode) < 0 {
+		log.Printf("Executing script failed with %08x", errorCode)
+		return 0
+	}
+	if result != nil {
+		log.Printf("%s", w32.Utf16PtrToString(result))
+	}
 	return 0
 }
 
@@ -358,4 +381,8 @@ func (e *Chromium) Focus() {
 		return
 	}
 	_ = e.controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
+}
+
+func (e *Chromium) Destroy() {
+	e.pinner.Unpin()
 }

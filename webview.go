@@ -12,8 +12,8 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/jchv/go-webview2/internal/w32"
-	"github.com/jchv/go-webview2/pkg/edge"
+	"github.com/soarqin/go-webview2/internal/w32"
+	"github.com/soarqin/go-webview2/pkg/edge"
 
 	"golang.org/x/sys/windows"
 )
@@ -44,6 +44,7 @@ type browser interface {
 	Eval(script string)
 	NotifyParentWindowPositionChanged() error
 	Focus()
+	Destroy()
 }
 
 type webview struct {
@@ -56,14 +57,21 @@ type webview struct {
 	m          sync.Mutex
 	bindings   map[string]interface{}
 	dispatchq  []func()
+	onDestroy  func()
+}
+
+type Color struct {
+	A, R, G, B uint8
 }
 
 type WindowOptions struct {
-	Title  string
-	Width  uint
-	Height uint
-	IconId uint
-	Center bool
+	Title           string
+	Width           uint
+	Height          uint
+	IconId          uint
+	Center          bool
+	Borderless      bool
+	BackgroundColor *Color
 }
 
 type WebViewOptions struct {
@@ -81,6 +89,10 @@ type WebViewOptions struct {
 	// WindowOptions customizes the window that is created to embed the
 	// WebView2 widget.
 	WindowOptions WindowOptions
+
+	// OnDestroy is an optional callback that is invoked when the window is
+	// being destroyed. If not set, the webview will terminate the main loop
+	OnDestroy func()
 }
 
 // New creates a new webview in a new window.
@@ -98,8 +110,14 @@ func NewWithOptions(options WebViewOptions) WebView {
 	w := &webview{}
 	w.bindings = map[string]interface{}{}
 	w.autofocus = options.AutoFocus
+	w.onDestroy = options.OnDestroy
 
-	chromium := edge.NewChromium()
+	chromium := edge.NewChromium(func(e *edge.Chromium) {
+		c := options.WindowOptions.BackgroundColor
+		if c != nil {
+			e.GetController().GetICoreWebView2Controller2().PutDefaultBackgroundColor(edge.COREWEBVIEW2_COLOR{R: c.R, G: c.G, B: c.B, A: c.A})
+		}
+	})
 	chromium.MessageCallback = w.msgcb
 	chromium.DataPath = options.DataPath
 	chromium.SetPermission(edge.CoreWebView2PermissionKindClipboardRead, edge.CoreWebView2PermissionStateAllow)
@@ -240,7 +258,11 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 		case w32.WMClose:
 			_, _, _ = w32.User32DestroyWindow.Call(hwnd)
 		case w32.WMDestroy:
-			w.Terminate()
+			if w.onDestroy == nil {
+				w.Terminate()
+			} else {
+				w.onDestroy()
+			}
 		case w32.WMGetMinMaxInfo:
 			lpmmi := (*w32.MinMaxInfo)(unsafe.Pointer(lp))
 			if w.maxsz.X > 0 && w.maxsz.Y > 0 {
@@ -317,11 +339,17 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		posY = w32.CW_USEDEFAULT
 	}
 
+	var style uintptr
+	if opts.Borderless {
+		style = w32.WSPopup
+	} else {
+		style = w32.WSOverlappedWindow
+	}
 	w.hwnd, _, _ = w32.User32CreateWindowExW.Call(
-		0,
+		w32.WSExNoRedirectionBitmap,
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(windowName)),
-		0xCF0000, // WS_OVERLAPPEDWINDOW
+		style,
 		uintptr(posX),
 		uintptr(posY),
 		uintptr(windowWidth),
@@ -346,6 +374,7 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 
 func (w *webview) Destroy() {
 	_, _, _ = w32.User32PostMessageW.Call(w.hwnd, w32.WMClose, 0, 0)
+	w.browser.Destroy()
 }
 
 func (w *webview) Run() {
@@ -357,15 +386,10 @@ func (w *webview) Run() {
 			0,
 			0,
 		)
-		if msg.Message == w32.WMApp {
-			w.m.Lock()
-			q := append([]func(){}, w.dispatchq...)
-			w.dispatchq = []func(){}
-			w.m.Unlock()
-			for _, v := range q {
-				v()
-			}
-		} else if msg.Message == w32.WMQuit {
+		switch msg.Message {
+		case w32.WMApp:
+			w.ProcessDispatchQueue()
+		case w32.WMQuit:
 			return
 		}
 		r, _, _ := w32.User32GetAncestor.Call(uintptr(msg.Hwnd), w32.GARoot)
@@ -375,6 +399,20 @@ func (w *webview) Run() {
 		}
 		_, _, _ = w32.User32TranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		_, _, _ = w32.User32DispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+	}
+}
+
+func (w *webview) ProcessDispatchQueue() {
+	w.m.Lock()
+	if len(w.dispatchq) == 0 {
+		w.m.Unlock()
+		return
+	}
+	q := append([]func(){}, w.dispatchq...)
+	w.dispatchq = []func(){}
+	w.m.Unlock()
+	for _, v := range q {
+		v()
 	}
 }
 
@@ -412,21 +450,26 @@ func (w *webview) SetSize(width int, height int, hints Hint) {
 	}
 	_, _, _ = w32.User32SetWindowLongPtrW.Call(w.hwnd, uintptr(index), style)
 
-	if hints == HintMax {
+	switch hints {
+	case HintMax:
 		w.maxsz.X = int32(width)
 		w.maxsz.Y = int32(height)
-	} else if hints == HintMin {
+	case HintMin:
 		w.minsz.X = int32(width)
 		w.minsz.Y = int32(height)
-	} else {
+	default:
 		r := w32.Rect{}
 		r.Left = 0
 		r.Top = 0
 		r.Right = int32(width)
 		r.Bottom = int32(height)
-		_, _, _ = w32.User32AdjustWindowRect.Call(uintptr(unsafe.Pointer(&r)), w32.WSOverlappedWindow, 0)
+		index = w32.GWLStyle
+		style, _, _ = w32.User32GetWindowLongPtrW.Call(w.hwnd, uintptr(index))
+		index = w32.GWLExStyle
+		exStyle, _, _ := w32.User32GetWindowLongPtrW.Call(w.hwnd, uintptr(index))
+		_, _, _ = w32.User32AdjustWindowRectEx.Call(uintptr(unsafe.Pointer(&r)), style, 0, exStyle)
 		_, _, _ = w32.User32SetWindowPos.Call(
-			w.hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top),
+			w.hwnd, 0, 0, 0, uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top),
 			w32.SWPNoZOrder|w32.SWPNoActivate|w32.SWPNoMove|w32.SWPFrameChanged)
 		w.browser.Resize()
 	}

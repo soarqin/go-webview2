@@ -38,7 +38,7 @@ var (
 	User32PostThreadMessageW = user32.NewProc("PostThreadMessageW")
 	User32GetWindowLongPtrW  = user32.NewProc("GetWindowLongPtrW")
 	User32SetWindowLongPtrW  = user32.NewProc("SetWindowLongPtrW")
-	User32AdjustWindowRect   = user32.NewProc("AdjustWindowRect")
+	User32AdjustWindowRectEx = user32.NewProc("AdjustWindowRectEx")
 	User32SetWindowPos       = user32.NewProc("SetWindowPos")
 	User32IsDialogMessage    = user32.NewProc("IsDialogMessage")
 	User32GetAncestor        = user32.NewProc("GetAncestor")
@@ -101,17 +101,20 @@ const (
 )
 
 const (
-	GWLStyle = -16
+	GWLStyle   = -16
+	GWLExStyle = -20
 )
 
 const (
-	WSOverlapped       = 0x00000000
-	WSMaximizeBox      = 0x00010000
-	WSThickFrame       = 0x00040000
-	WSCaption          = 0x00C00000
-	WSSysMenu          = 0x00080000
-	WSMinimizeBox      = 0x00020000
-	WSOverlappedWindow = (WSOverlapped | WSCaption | WSSysMenu | WSThickFrame | WSMinimizeBox | WSMaximizeBox)
+	WSOverlapped            = 0x00000000
+	WSMaximizeBox           = 0x00010000
+	WSThickFrame            = 0x00040000
+	WSCaption               = 0x00C00000
+	WSSysMenu               = 0x00080000
+	WSMinimizeBox           = 0x00020000
+	WSPopup                 = 0x80000000
+	WSOverlappedWindow      = (WSOverlapped | WSCaption | WSSysMenu | WSThickFrame | WSMinimizeBox | WSMaximizeBox)
+	WSExNoRedirectionBitmap = 0x00200000
 )
 
 const (
