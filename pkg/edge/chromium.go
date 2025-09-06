@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/jchv/go-webview2/internal/w32"
+	"github.com/soarqin/go-webview2/internal/w32"
 	"golang.org/x/sys/windows"
 )
 
@@ -42,9 +42,12 @@ type Chromium struct {
 	WebResourceRequestedCallback func(request *ICoreWebView2WebResourceRequest, args *ICoreWebView2WebResourceRequestedEventArgs)
 	NavigationCompletedCallback  func(sender *ICoreWebView2, args *ICoreWebView2NavigationCompletedEventArgs)
 	AcceleratorKeyCallback       func(uint) bool
+
+	// Private callbacks
+	onInit func(*Chromium)
 }
 
-func NewChromium() *Chromium {
+func NewChromium(onInit func(*Chromium)) *Chromium {
 	e := &Chromium{}
 	/*
 	 All these handlers are passed to native code through syscalls with 'uintptr(unsafe.Pointer(handler))' and we know
@@ -65,6 +68,8 @@ func NewChromium() *Chromium {
 	e.acceleratorKeyPressed = newICoreWebView2AcceleratorKeyPressedEventHandler(e)
 	e.navigationCompleted = newICoreWebView2NavigationCompletedEventHandler(e)
 	e.permissions = make(map[CoreWebView2PermissionKind]CoreWebView2PermissionState)
+
+	e.onInit = onInit
 
 	return e
 }
@@ -227,6 +232,21 @@ func (e *Chromium) CreateCoreWebView2ControllerCompleted(res uintptr, controller
 		e.Focus()
 	}
 
+	if e.onInit != nil {
+		e.onInit(e)
+	}
+
+	return 0
+}
+
+func (e *Chromium) ExecuteScriptCompleted(errorCode uintptr, result *uint16) uintptr {
+	if int64(errorCode) < 0 {
+		log.Printf("Executing script failed with %08x", errorCode)
+		return 0
+	}
+	if result != nil {
+		log.Printf("%s", w32.Utf16PtrToString(result))
+	}
 	return 0
 }
 

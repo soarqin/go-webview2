@@ -29,6 +29,11 @@ type WebView interface {
 	// you must destroy the webview.
 	Run()
 
+	// ProcessDispatchQueue processes all pending dispatch callbacks. You normally
+	// do not need to call this function, unless you do not use the built-in Run()
+	// as your main loop.
+	ProcessDispatchQueue()
+
 	// Terminate stops the main loop. It is safe to call this function from
 	// a background thread.
 	Terminate()
